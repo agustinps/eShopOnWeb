@@ -1,0 +1,76 @@
+# CI for eShopOnWeb with GitHub Actions (AZ-400 manual, chapter 04).
+# Same idea as the Azure Pipelines ci.yml: build + unit tests on Linux and Windows, NuGet cache, artifact.
+name: eShopOnWeb CI
+
+on:
+  push:
+    branches: [main, 'feature/**']
+    paths-ignore: ['**.md']           # documentation changes don't start CI
+  pull_request:
+    branches: [main]
+  workflow_dispatch:                  # "Run workflow" button
+
+permissions:
+  contents: read                      # least privilege for GITHUB_TOKEN
+
+concurrency:                          # a new push cancels the previous run of the same branch
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false                # let the other OS finish if one fails
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        id: nuget-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Build
+        run: |
+          echo "NuGet cache hit: ${{ steps.nuget-cache.outputs.cache-hit }}"
+          dotnet build eShopOnWeb.sln --configuration Release
+
+      - name: Unit tests
+        run: dotnet test tests/UnitTests/UnitTests.csproj --configuration Release --no-build --logger trx --results-directory TestResults
+
+      - name: Upload test results
+        if: always()                  # also when tests fail
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-${{ matrix.os }}
+          path: TestResults
+
+  publish:
+    needs: build                      # runs after both matrix jobs succeed
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - run: dotnet publish src/Web/Web.csproj --configuration Release --output web
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web
+          path: web
+          retention-days: 5
